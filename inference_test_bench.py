@@ -32,6 +32,7 @@ from torchvision.transforms import Resize
 from PIL import Image
 from torchvision.transforms import PILToTensor
 
+import logging
 
 
 
@@ -513,72 +514,116 @@ def main():
                             x = x.squeeze(0)
                         return x
 
+                    # Configure logging
+                    logging.basicConfig(
+                        filename='image_saving.log',
+                        filemode='a',
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        level=logging.DEBUG
+                    )
+                    
+                    # Assuming necessary imports and initializations are done above
+                    
                     if not opt.skip_save:
                         for i, x_sample in enumerate(x_checked_image_torch):
+                            try:
+                                logging.info(f"Processing sample {i} with segment ID {segment_id_batch[i]}.")
                     
-                            all_img = []
-                            all_img.append(un_norm(test_batch[i]).cpu())  # Original Image (GT)
-                            all_img.append(un_norm(inpaint_image[i]).cpu())  # Inpaint Image
+                                all_img = []
+                                all_img.append(un_norm(test_batch[i]).cpu())  # Original Image (GT)
+                                all_img.append(un_norm(inpaint_image[i]).cpu())  # Inpaint Image
                     
-                            # Process Reference Image
-                            ref_img = test_model_kwargs['ref_imgs'].squeeze(1)
-                            ref_img = Resize([512, 512])(ref_img)
-                            all_img.append(un_norm_clip(ref_img[i]).cpu())  # Reference Image
+                                # Process Reference Image
+                                ref_img = test_model_kwargs['ref_imgs'].squeeze(1)
+                                ref_img = Resize([512, 512])(ref_img)
+                                all_img.append(un_norm_clip(ref_img[i]).cpu())  # Reference Image
                     
-                            all_img.append(x_sample)  # Generated Image
+                                all_img.append(x_sample)  # Generated Image
                     
-                            # Create and save grid image
-                            grid = torch.stack(all_img, 0)
-                            grid = make_grid(grid)
-                            grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                            img = Image.fromarray(grid.astype(np.uint8))
-                            img.save(os.path.join(grid_path, f'grid-{segment_id_batch[i]}.png'))
+                                # Create and save grid image
+                                grid = torch.stack(all_img, 0)
+                                grid = make_grid(grid)
+                                grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
+                                grid_image = Image.fromarray(grid.astype(np.uint8))
+                                grid_filename = os.path.join(grid_path, f'grid-{segment_id_batch[i]}.png')
+                                grid_image.save(grid_filename)
+                                logging.info(f"Grid image saved at {grid_filename}.")
                     
-                            # Save Generated Image to Val
-                            generated_img = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                            img = Image.fromarray(generated_img.astype(np.uint8))
-                            img.save(os.path.join(result_path, f"{segment_id_batch[i]}.png"))
+                                # Save Generated Image to Val
+                                generated_img = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                                generated_image = Image.fromarray(generated_img.astype(np.uint8))
+                                generated_filename = os.path.join(result_path, f"{segment_id_batch[i]}.png")
+                                generated_image.save(generated_filename)
+                                logging.info(f"Generated image saved at {generated_filename}.")
                     
-                            # Save Mask to src_mask/
-                            mask_save = 255. * rearrange(un_norm(test_model_kwargs['inpaint_mask'][i]).cpu(), 'c h w -> h w c').numpy()
-                            mask_save = cv2.cvtColor(mask_save, cv2.COLOR_GRAY2RGB)
-                            mask_save = Image.fromarray(mask_save.astype(np.uint8))
-                            mask_save.save(os.path.join(src_mask_path, f"{segment_id_batch[i]}_mask.png"))
+                                # Save Mask to src_mask/
+                                if 'inpaint_mask' in test_model_kwargs and test_model_kwargs['inpaint_mask'][i] is not None:
+                                    inpaint_mask_tensor = un_norm(test_model_kwargs['inpaint_mask'][i]).cpu()
+                                    mask_save = 255. * rearrange(inpaint_mask_tensor, 'c h w -> h w c').numpy()
+                                    mask_save = cv2.cvtColor(mask_save, cv2.COLOR_GRAY2RGB)
+                                    mask_image = Image.fromarray(mask_save.astype(np.uint8))
+                                    mask_filename = os.path.join(src_mask_path, f"{segment_id_batch[i]}_mask.png")
+                                    mask_image.save(mask_filename)
+                                    logging.info(f"Inpaint mask saved at {mask_filename}.")
+                                else:
+                                    logging.warning(f"Inpaint mask missing for segment ID {segment_id_batch[i]}.")
                     
-                            # Save Reference Mask to target_mask/
-                            if 'ref_mask' in test_model_kwargs and test_model_kwargs['ref_mask'] is not None:
-                                ref_mask = 255. * rearrange(un_norm(test_model_kwargs['ref_mask'][i]).cpu(), 'c h w -> h w c').numpy()
-                            else:
-                                # If 'ref_mask' is not available, default to using the inpaint mask
-                                ref_mask = mask_save
-                            ref_mask = cv2.cvtColor(ref_mask, cv2.COLOR_GRAY2RGB)
-                            ref_mask = Image.fromarray(ref_mask.astype(np.uint8))
-                            ref_mask.save(os.path.join(target_mask_path, f"{segment_id_batch[i]}_ref_mask.png"))
+                                # Save Reference Mask to target_mask/
+                                if 'ref_mask' in test_model_kwargs and test_model_kwargs['ref_mask'] is not None:
+                                    ref_mask_tensor = un_norm(test_model_kwargs['ref_mask'][i]).cpu()
+                                    ref_mask = 255. * rearrange(ref_mask_tensor, 'c h w -> h w c').numpy()
+                                    logging.info(f"Reference mask found for segment ID {segment_id_batch[i]}.")
+                                else:
+                                    # If 'ref_mask' is not available, default to using the inpaint mask
+                                    ref_mask = mask_save
+                                    logging.info(f"'ref_mask' not found. Using inpaint mask for segment ID {segment_id_batch[i]}.")
                     
-                            # Save Original Image to Val_target
-                            original_img = 255. * rearrange(un_norm(test_batch[i]).cpu().numpy(), 'c h w -> h w c')
-                            original_img = Image.fromarray(original_img.astype(np.uint8))
-                            original_img.save(os.path.join(val_target_path, f"{segment_id_batch[i]}.png"))
+                                ref_mask = cv2.cvtColor(ref_mask, cv2.COLOR_GRAY2RGB)
+                                ref_mask_image = Image.fromarray(ref_mask.astype(np.uint8))
+                                ref_mask_filename = os.path.join(target_mask_path, f"{segment_id_batch[i]}_ref_mask.png")
+                                ref_mask_image.save(ref_mask_filename)
+                                logging.info(f"Reference mask saved at {ref_mask_filename}.")
                     
-                            # Optionally, save other related images
-                            GT_img = 255. * rearrange(all_img[0], 'c h w -> h w c').numpy()
-                            GT_img = Image.fromarray(GT_img.astype(np.uint8))
-                            GT_img.save(os.path.join(sample_path, f"{segment_id_batch[i]}_GT.png"))
+                                # Save Original Image to Val_target
+                                original_img = 255. * rearrange(un_norm(test_batch[i]).cpu().numpy(), 'c h w -> h w c')
+                                original_image = Image.fromarray(original_img.astype(np.uint8))
+                                original_filename = os.path.join(val_target_path, f"{segment_id_batch[i]}.png")
+                                original_image.save(original_filename)
+                                logging.info(f"Original image saved at {original_filename}.")
                     
-                            inpaint_img = 255. * rearrange(all_img[1], 'c h w -> h w c').numpy()
-                            inpaint_img = Image.fromarray(inpaint_img.astype(np.uint8))
-                            inpaint_img.save(os.path.join(sample_path, f"{segment_id_batch[i]}_inpaint.png"))
+                                # Optionally, save other related images
+                                # Save Ground Truth Image
+                                GT_img = 255. * rearrange(all_img[0], 'c h w -> h w c').numpy()
+                                GT_image = Image.fromarray(GT_img.astype(np.uint8))
+                                GT_filename = os.path.join(sample_path, f"{segment_id_batch[i]}_GT.png")
+                                GT_image.save(GT_filename)
+                                logging.info(f"Ground truth image saved at {GT_filename}.")
                     
-                            ref_img_save = 255. * rearrange(all_img[2], 'c h w -> h w c').numpy()
-                            ref_img_save = Image.fromarray(ref_img_save.astype(np.uint8))
-                            ref_img_save.save(os.path.join(sample_path, f"{segment_id_batch[i]}_ref.png"))
+                                # Save Inpainted Image
+                                inpaint_img = 255. * rearrange(all_img[1], 'c h w -> h w c').numpy()
+                                inpaint_image_pil = Image.fromarray(inpaint_img.astype(np.uint8))
+                                inpaint_filename = os.path.join(sample_path, f"{segment_id_batch[i]}_inpaint.png")
+                                inpaint_image_pil.save(inpaint_filename)
+                                logging.info(f"Inpainted image saved at {inpaint_filename}.")
                     
-                            base_count += 1
+                                # Save Reference Image
+                                ref_img_save = 255. * rearrange(all_img[2], 'c h w -> h w c').numpy()
+                                ref_image = Image.fromarray(ref_img_save.astype(np.uint8))
+                                ref_filename = os.path.join(sample_path, f"{segment_id_batch[i]}_ref.png")
+                                ref_image.save(ref_filename)
+                                logging.info(f"Reference image saved at {ref_filename}.")
+                    
+                                base_count += 1
+                    
+                            except Exception as e:
+                                logging.error(f"Error processing sample {i} (Segment ID: {segment_id_batch[i]}): {e}")
+                                continue  # Skip to the next sample in case of error
                     
                     if not opt.skip_grid:
                         all_samples.append(x_checked_image_torch)
                     
                     print(f"Your samples are ready and waiting for you here: \n{outpath} \nEnjoy.")
+                    logging.info("Image saving process completed.")
 
 
 if __name__ == "__main__":
