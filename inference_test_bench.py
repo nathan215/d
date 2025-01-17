@@ -3,10 +3,8 @@ import cv2
 import torch
 import numpy as np
 from omegaconf import OmegaConf
-# import pandas as pd
 from PIL import Image
 from tqdm import tqdm, trange
-# from imwatermark import WatermarkEncoder
 from itertools import islice
 from einops import rearrange
 from torchvision.utils import make_grid
@@ -24,49 +22,31 @@ from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionS
 from transformers import AutoFeatureExtractor
 
 from ldm.data.test_bench_dataset import COCOImageDataset
-from ldm.data.test_bench_dataset import CelebAdataset,FFHQdataset,FFdataset
-# import clip
+from ldm.data.test_bench_dataset import CelebAdataset, FFHQdataset, FFdataset
 from torchvision.transforms import Resize
-
 
 from PIL import Image
 from torchvision.transforms import PILToTensor
 
 import logging
 
-
-
-# from dift.src.models.dift_sd import SDFeaturizer
-# from dift.src.utils.visualization import Demo
-
-
-# import matplotlib.pyplot as plt
 import torch.nn as nn
-
-# cos = nn.CosineSimilarity(dim=0)
-import numpy as np  
 
 # load safety model
 safety_model_id = "CompVis/stable-diffusion-safety-checker"
 safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
 safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
-# set cuda device 
-
-def save_sample_by_decode(x,model,Base_path,segment_id_batch,intermediate_num):
-
-    
+def save_sample_by_decode(x, model, Base_path, segment_id_batch, intermediate_num):
     x = model.decode_first_stage(x)
     x = torch.clamp((x + 1.0) / 2.0, min=0.0, max=1.0)
     x = x.cpu().permute(0, 2, 3, 1).numpy()
     for i in range(len(x)):
         img = Image.fromarray((x[i] * 255).astype(np.uint8))
-        save_path=os.path.join(Base_path, f"{segment_id_batch[i]}")
+        save_path = os.path.join(Base_path, f"{segment_id_batch[i]}")
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        img.save(os.path.join(Base_path, f"{segment_id_batch[i]}/{intermediate_num}.png"))
-    
-
+        img.save(os.path.join(save_path, f"{intermediate_num}.png"))
 
 def chunk(it, size):
     it = iter(it)
@@ -93,7 +73,6 @@ def numpy_to_pil(images):
 
     return pil_images
 
-
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
     pl_sd = torch.load(ckpt, map_location="cpu")
@@ -113,14 +92,12 @@ def load_model_from_config(config, ckpt, verbose=False):
     model.eval()
     return model
 
-
 def put_watermark(img, wm_encoder=None):
     if wm_encoder is not None:
         img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
         img = wm_encoder.encode(img, 'dwtDct')
         img = Image.fromarray(img[:, :, ::-1])
     return img
-
 
 def load_replacement(x):
     try:
@@ -132,7 +109,6 @@ def load_replacement(x):
     except Exception:
         return x
 
-
 def check_safety(x_image):
     safety_checker_input = safety_feature_extractor(numpy_to_pil(x_image), return_tensors="pt")
     x_checked_image, has_nsfw_concept = safety_checker(images=x_image, clip_input=safety_checker_input.pixel_values)
@@ -141,7 +117,6 @@ def check_safety(x_image):
         if has_nsfw_concept[i]:
             x_checked_image[i] = load_replacement(x_checked_image[i])
     return x_checked_image, has_nsfw_concept
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -339,10 +314,8 @@ def main():
     else:
         sampler = DDIMSampler(model)
 
-
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
-
 
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
@@ -359,72 +332,68 @@ def main():
 
     sample_path = os.path.join(outpath, "samples")
     result_path = os.path.join(outpath, "results")
-    grid_path=os.path.join(outpath, "grid")
+    grid_path = os.path.join(outpath, "grid")
+    src_mask_path = os.path.join(sample_path, "src_mask")       # 新增：src_mask 目录
+    target_mask_path = os.path.join(sample_path, "target_mask") # 新增：target_mask 目录
     os.makedirs(sample_path, exist_ok=True)
     os.makedirs(result_path, exist_ok=True)
     os.makedirs(grid_path, exist_ok=True)
+    os.makedirs(src_mask_path, exist_ok=True)        # 新增：创建 src_mask 目录
+    os.makedirs(target_mask_path, exist_ok=True)     # 新增：创建 target_mask 目录
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(outpath)) - 1
 
- 
-
     # test_dataset=COCOImageDataset(test_bench_dir='test_bench') 
     #read config file :configs/v2.yaml
-    conf_file=OmegaConf.load(opt.config)
-    # breakpoint()
-    test_args=conf_file.data.params.test.params
+    conf_file = OmegaConf.load(opt.config)
+    test_args = conf_file.data.params.test.params
     
-    if opt.dataset=='CelebA':
-        test_dataset=CelebAdataset(split='test',**test_args)
+    if opt.dataset == 'CelebA':
+        test_dataset = CelebAdataset(split='test', **test_args)
         
-    elif opt.dataset=='FFHQ':
-        test_dataset=FFHQdataset(split='test',**test_args)
+    elif opt.dataset == 'FFHQ':
+        test_dataset = FFHQdataset(split='test', **test_args)
         
-    elif opt.dataset=='FF++':
-        test_args['dataset_dir']=opt.dataset_dir if opt.dataset_dir is not None else test_args['dataset_dir']
-        test_dataset=FFdataset(split='test',**test_args)
+    elif opt.dataset == 'FF++':
+        test_args['dataset_dir'] = opt.dataset_dir if opt.dataset_dir is not None else test_args['dataset_dir']
+        test_dataset = FFdataset(split='test', **test_args)
         
-    test_dataloader= torch.utils.data.DataLoader(test_dataset, 
+    test_dataloader = torch.utils.data.DataLoader(test_dataset, 
                                         batch_size=batch_size, 
                                         num_workers=4, 
                                         pin_memory=True, 
                                         shuffle=False,
                                         drop_last=False)
 
-
-
-
-
     start_code = None
     if opt.fixed_code:
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
 
-   
-    use_prior=True
+    use_prior = True
     
-    precision_scope = autocast if opt.precision=="autocast" else nullcontext
-    sample=0
+    precision_scope = autocast if opt.precision == "autocast" else nullcontext
+    sample = 0
     with torch.no_grad():
         with precision_scope("cuda"):
             with model.ema_scope():
                 all_samples = list()
-                for test_batch,prior, test_model_kwargs,segment_id_batch in test_dataloader:
-                    sample+=opt.n_samples
-                    # if sample<980:
+                for test_batch, prior, test_model_kwargs, segment_id_batch in test_dataloader:
+                    sample += opt.n_samples
+                    # if sample < 980:
                     #     continue
                     if opt.Start_from_target:
                         
-                        x=test_batch
-                        x=x.to(device)
+                        x = test_batch
+                        x = x.to(device)
                         encoder_posterior = model.encode_first_stage(x)
                         z = model.get_first_stage_encoding(encoder_posterior)
-                        t=int(opt.target_start_noise_t)
+                        t = int(opt.target_start_noise_t)
                         # t = torch.ones((x.shape[0],), device=device).long()*t
                         t = torch.randint(t-1, t, (x.shape[0],), device=device).long()
                     
                         if use_prior:
-                            prior=prior.to(device)
-                            encoder_posterior_2=model.encode_first_stage(prior)
+                            prior = prior.to(device)
+                            encoder_posterior_2 = model.encode_first_stage(prior)
                             z2 = model.get_first_stage_encoding(encoder_posterior_2)
                             noise = torch.randn_like(z2)
                             x_noisy = model.q_sample(x_start=z2, t=t, noise=noise)
@@ -435,38 +404,35 @@ def main():
                             x_noisy = model.q_sample(x_start=z, t=t, noise=noise)
                             start_code = x_noisy
                         # print('start from target')
-                        
-                    test_model_kwargs={n:test_model_kwargs[n].to(device,non_blocking=True) for n in test_model_kwargs }
+                    
+                    test_model_kwargs = {n: test_model_kwargs[n].to(device, non_blocking=True) for n in test_model_kwargs }
                     uc = None
                     if opt.scale != 1.0:
-                        uc = model.learnable_vector.repeat(test_batch.shape[0],1,1)
+                        uc = model.learnable_vector.repeat(test_batch.shape[0], 1, 1)
                         if model.stack_feat:
-                            uc2=model.other_learnable_vector.repeat(test_batch.shape[0],1,1)
-                            uc=torch.cat([uc,uc2],dim=-1)
+                            uc2 = model.other_learnable_vector.repeat(test_batch.shape[0], 1, 1)
+                            uc = torch.cat([uc, uc2], dim=-1)
                     
                     # c = model.get_learned_conditioning(test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float16))
-                    landmarks=model.get_landmarks(test_batch) if model.Landmark_cond else None
-                    c=model.conditioning_with_feat(test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32),landmarks=landmarks,tar=test_batch.to("cuda").to(torch.float32)).float()
+                    landmarks = model.get_landmarks(test_batch) if model.Landmark_cond else None
+                    c = model.conditioning_with_feat(test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32), landmarks=landmarks, tar=test_batch.to("cuda").to(torch.float32)).float()
                     if (model.land_mark_id_seperate_layers or model.sep_head_att) and opt.scale != 1.0:
-            
                         # concat c, landmarks
-                        landmarks=landmarks.unsqueeze(1) if len(landmarks.shape)!=3 else landmarks
-                        uc=torch.cat([uc,landmarks],dim=-1)
+                        landmarks = landmarks.unsqueeze(1) if len(landmarks.shape) != 3 else landmarks
+                        uc = torch.cat([uc, landmarks], dim=-1)
                     
-                    
-                    if c.shape[-1]==1024:
+                    if c.shape[-1] == 1024:
                         c = model.proj_out(c)
-                    if len(c.shape)==2:
+                    if len(c.shape) == 2:
                         c = c.unsqueeze(1)
-                    inpaint_image=test_model_kwargs['inpaint_image']
-                    inpaint_mask=test_model_kwargs['inpaint_mask']
+                    inpaint_image = test_model_kwargs['inpaint_image']
+                    inpaint_mask = test_model_kwargs['inpaint_mask']
                     z_inpaint = model.encode_first_stage(test_model_kwargs['inpaint_image'])
                     z_inpaint = model.get_first_stage_encoding(z_inpaint).detach()
-                    test_model_kwargs['inpaint_image']=z_inpaint
-                    test_model_kwargs['inpaint_mask']=Resize([z_inpaint.shape[-1],z_inpaint.shape[-1]])(test_model_kwargs['inpaint_mask'])
+                    test_model_kwargs['inpaint_image'] = z_inpaint
+                    test_model_kwargs['inpaint_mask'] = Resize([z_inpaint.shape[-1], z_inpaint.shape[-1]])(test_model_kwargs['inpaint_mask'])
 
                     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                    # breakpoint()
                     samples_ddim, intermediates = sampler.sample(S=opt.ddim_steps,
                                                         conditioning=c,
                                                         batch_size=test_batch.shape[0],
@@ -477,35 +443,35 @@ def main():
                                                         eta=opt.ddim_eta,
                                                         x_T=start_code,
                                                         log_every_t=100,
-                                                        test_model_kwargs=test_model_kwargs,src_im=test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32),tar=test_batch.to("cuda"))
+                                                        test_model_kwargs=test_model_kwargs, src_im=test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32), tar=test_batch.to("cuda"))
                     # breakpoint()
-                    save_intermediates=False
-                    
+                    save_intermediates = False
                     
                     # breakpoint()
                     if save_intermediates:
-                        intermediate_pred_x0=intermediates['pred_x0']
-                        intermediate_noised=intermediates['x_inter']
+                        intermediate_pred_x0 = intermediates['pred_x0']
+                        intermediate_noised = intermediates['x_inter']
                         for i in range(len(intermediate_pred_x0)):
-                            save_sample_by_decode(intermediate_pred_x0[i],model,Base_path="Save_intermediates/pred_x0",segment_id_batch=segment_id_batch,intermediate_num=i)
-                            save_sample_by_decode(intermediate_noised[i],model,Base_path="Save_intermediates/intermediate",segment_id_batch=segment_id_batch,intermediate_num=i)
+                            save_sample_by_decode(intermediate_pred_x0[i], model, Base_path="Save_intermediates/pred_x0", segment_id_batch=segment_id_batch, intermediate_num=i)
+                            save_sample_by_decode(intermediate_noised[i], model, Base_path="Save_intermediates/intermediate", segment_id_batch=segment_id_batch, intermediate_num=i)
                     
-                    
+                    # Decode samples
                     x_samples_ddim = model.decode_first_stage(samples_ddim)
                     x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                     x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
 
-                    x_checked_image=x_samples_ddim
+                    x_checked_image = x_samples_ddim
                     x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
 
                     def un_norm(x):
-                        return (x+1.0)/2.0
+                        return (x + 1.0) / 2.0
+
                     def un_norm_clip(x1):
-                        x = x1*1.0 # to avoid changing the original tensor or clone() can be used
-                        reduce=False
-                        if len(x.shape)==3:
+                        x = x1 * 1.0  # to avoid changing the original tensor or clone() can be used
+                        reduce = False
+                        if len(x.shape) == 3:
                             x = x.unsqueeze(0)
-                            reduce=True
+                            reduce = True
                         x[:,0,:,:] = x[:,0,:,:] * 0.26862954 + 0.48145466
                         x[:,1,:,:] = x[:,1,:,:] * 0.26130258 + 0.4578275
                         x[:,2,:,:] = x[:,2,:,:] * 0.27577711 + 0.40821073
@@ -521,8 +487,6 @@ def main():
                         format='%(asctime)s - %(levelname)s - %(message)s',
                         level=logging.DEBUG
                     )
-                    
-                    # Assuming necessary imports and initializations are done above
                     
                     if not opt.skip_save:
                         for i, x_sample in enumerate(x_checked_image_torch):
@@ -549,14 +513,14 @@ def main():
                                 grid_image.save(grid_filename)
                                 logging.info(f"Grid image saved at {grid_filename}.")
                     
-                                # Save Generated Image to Val
+                                # Save Generated Image to Results
                                 generated_img = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                                 generated_image = Image.fromarray(generated_img.astype(np.uint8))
                                 generated_filename = os.path.join(result_path, f"{segment_id_batch[i]}.png")
                                 generated_image.save(generated_filename)
                                 logging.info(f"Generated image saved at {generated_filename}.")
                     
-                                # Save Mask to src_mask/
+                                # Save Inpaint Mask to src_mask/
                                 if 'inpaint_mask' in test_model_kwargs and test_model_kwargs['inpaint_mask'][i] is not None:
                                     inpaint_mask_tensor = un_norm(test_model_kwargs['inpaint_mask'][i]).cpu()
                                     mask_save = 255. * rearrange(inpaint_mask_tensor, 'c h w -> h w c').numpy()
@@ -584,10 +548,10 @@ def main():
                                 ref_mask_image.save(ref_mask_filename)
                                 logging.info(f"Reference mask saved at {ref_mask_filename}.")
                     
-                                # Save Original Image to Val_target
+                                # Save Original Image (val_target) to samples/
                                 original_img = 255. * rearrange(un_norm(test_batch[i]).cpu().numpy(), 'c h w -> h w c')
                                 original_image = Image.fromarray(original_img.astype(np.uint8))
-                                original_filename = os.path.join(val_target_path, f"{segment_id_batch[i]}.png")
+                                original_filename = os.path.join(sample_path, f"{segment_id_batch[i]}.png")
                                 original_image.save(original_filename)
                                 logging.info(f"Original image saved at {original_filename}.")
                     
@@ -624,7 +588,6 @@ def main():
                     
                     print(f"Your samples are ready and waiting for you here: \n{outpath} \nEnjoy.")
                     logging.info("Image saving process completed.")
-
 
 if __name__ == "__main__":
     main()
