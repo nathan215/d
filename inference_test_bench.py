@@ -290,9 +290,8 @@ def main():
         choices=["full", "autocast"],
         default="full"
     )
+   # Parse arguments
     opt = parser.parse_args()
-    
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     
     print(opt)
     if opt.laion400m:
@@ -300,294 +299,191 @@ def main():
         opt.config = "configs/latent-diffusion/txt2img-1p4B-eval.yaml"
         opt.ckpt = "models/ldm/text2img-large/model.ckpt"
         opt.outdir = "outputs/txt2img-samples-laion400m"
-
+    
     seed_everything(opt.seed)
-    # torch.cuda.set_device(opt.device_ID)
+    
+    # Load the model configuration and weights
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
-
+    
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
-
+    
     if opt.plms:
         sampler = PLMSSampler(model)
     else:
         sampler = DDIMSampler(model)
-
+    
+    # Create output directories
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
-
-    batch_size = opt.n_samples
-    n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
-    if not opt.from_file:
-        prompt = opt.prompt
-        assert prompt is not None
-        data = [batch_size * [prompt]]
-
-    else:
-        print(f"reading prompts from {opt.from_file}")
-        with open(opt.from_file, "r") as f:
-            data = f.read().splitlines()
-            data = list(chunk(data, batch_size))
-
+    
     sample_path = os.path.join(outpath, "samples")
     result_path = os.path.join(outpath, "results")
     grid_path = os.path.join(outpath, "grid")
-    src_mask_path = os.path.join(sample_path, "src_mask")       # 新增：src_mask 目录
-    target_mask_path = os.path.join(sample_path, "target_mask") # 新增：target_mask 目录
     os.makedirs(sample_path, exist_ok=True)
     os.makedirs(result_path, exist_ok=True)
     os.makedirs(grid_path, exist_ok=True)
-    os.makedirs(src_mask_path, exist_ok=True)        # 新增：创建 src_mask 目录
-    os.makedirs(target_mask_path, exist_ok=True)     # 新增：创建 target_mask 目录
-    base_count = len(os.listdir(sample_path))
-    grid_count = len(os.listdir(outpath)) - 1
-
-    # test_dataset=COCOImageDataset(test_bench_dir='test_bench') 
-    #read config file :configs/v2.yaml
+    
+    # Load the test dataset
     conf_file = OmegaConf.load(opt.config)
     test_args = conf_file.data.params.test.params
     
     if opt.dataset == 'CelebA':
         test_dataset = CelebAdataset(split='test', **test_args)
-        
     elif opt.dataset == 'FFHQ':
         test_dataset = FFHQdataset(split='test', **test_args)
-        
     elif opt.dataset == 'FF++':
         test_args['dataset_dir'] = opt.dataset_dir if opt.dataset_dir is not None else test_args['dataset_dir']
         test_dataset = FFdataset(split='test', **test_args)
-        
-    test_dataloader = torch.utils.data.DataLoader(test_dataset, 
-                                        batch_size=batch_size, 
-                                        num_workers=4, 
-                                        pin_memory=True, 
-                                        shuffle=False,
-                                        drop_last=False)
-
-    start_code = None
+    
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=opt.n_samples,
+        num_workers=4,
+        pin_memory=True,
+        shuffle=False,
+        drop_last=False
+    )
+    
+    # Prepare for sampling
     if opt.fixed_code:
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
-
-    use_prior = True
+    else:
+        start_code = None
     
-    precision_scope = autocast if opt.precision == "autocast" else nullcontext
-    sample = 0
+    use_prior = True
+    precision_scope = torch.cuda.amp.autocast if opt.precision == "autocast" else nullcontext
+    
+    # Sampling loop
     with torch.no_grad():
         with precision_scope("cuda"):
             with model.ema_scope():
-                all_samples = list()
+                all_samples = []
                 for test_batch, prior, test_model_kwargs, segment_id_batch in test_dataloader:
-                    sample += opt.n_samples
-                    # if sample < 980:
-                    #     continue
+                    test_batch = test_batch.to(device)
+                    prior = prior.to(device)
+                    test_model_kwargs = {k: v.to(device) for k, v in test_model_kwargs.items()}
+                    segment_id_batch = segment_id_batch  # List of IDs for naming
+    
+                    # Starting code (noise)
                     if opt.Start_from_target:
-                        
-                        x = test_batch
-                        x = x.to(device)
-                        encoder_posterior = model.encode_first_stage(x)
+                        encoder_posterior = model.encode_first_stage(test_batch)
                         z = model.get_first_stage_encoding(encoder_posterior)
+    
                         t = int(opt.target_start_noise_t)
-                        # t = torch.ones((x.shape[0],), device=device).long()*t
-                        t = torch.randint(t-1, t, (x.shape[0],), device=device).long()
-                    
+                        t = torch.randint(t - 1, t, (test_batch.shape[0],), device=device).long()
+    
                         if use_prior:
-                            prior = prior.to(device)
                             encoder_posterior_2 = model.encode_first_stage(prior)
                             z2 = model.get_first_stage_encoding(encoder_posterior_2)
                             noise = torch.randn_like(z2)
                             x_noisy = model.q_sample(x_start=z2, t=t, noise=noise)
                             start_code = x_noisy
-                            # print('start from target')
                         else:
                             noise = torch.randn_like(z)
                             x_noisy = model.q_sample(x_start=z, t=t, noise=noise)
                             start_code = x_noisy
-                        # print('start from target')
-                    
-                    test_model_kwargs = {n: test_model_kwargs[n].to(device, non_blocking=True) for n in test_model_kwargs }
+    
+                    # Conditioning
                     uc = None
                     if opt.scale != 1.0:
                         uc = model.learnable_vector.repeat(test_batch.shape[0], 1, 1)
                         if model.stack_feat:
                             uc2 = model.other_learnable_vector.repeat(test_batch.shape[0], 1, 1)
                             uc = torch.cat([uc, uc2], dim=-1)
-                    
-                    # c = model.get_learned_conditioning(test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float16))
+    
                     landmarks = model.get_landmarks(test_batch) if model.Landmark_cond else None
-                    c = model.conditioning_with_feat(test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32), landmarks=landmarks, tar=test_batch.to("cuda").to(torch.float32)).float()
-                    if (model.land_mark_id_seperate_layers or model.sep_head_att) and opt.scale != 1.0:
-                        # concat c, landmarks
-                        landmarks = landmarks.unsqueeze(1) if len(landmarks.shape) != 3 else landmarks
-                        uc = torch.cat([uc, landmarks], dim=-1)
-                    
+                    c = model.conditioning_with_feat(
+                        test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32),
+                        landmarks=landmarks,
+                        tar=test_batch
+                    )
+                    c = c.float()
+    
                     if c.shape[-1] == 1024:
                         c = model.proj_out(c)
                     if len(c.shape) == 2:
                         c = c.unsqueeze(1)
-                    inpaint_image = test_model_kwargs['inpaint_image']
-                    inpaint_mask = test_model_kwargs['inpaint_mask']
-                    z_inpaint = model.encode_first_stage(test_model_kwargs['inpaint_image'])
+    
+                    # Inpainting data
+                    inpaint_image = test_model_kwargs['inpaint_image'].to(device)
+                    inpaint_mask = test_model_kwargs['inpaint_mask'].to(device)
+                    z_inpaint = model.encode_first_stage(inpaint_image)
                     z_inpaint = model.get_first_stage_encoding(z_inpaint).detach()
                     test_model_kwargs['inpaint_image'] = z_inpaint
-                    test_model_kwargs['inpaint_mask'] = Resize([z_inpaint.shape[-1], z_inpaint.shape[-1]])(test_model_kwargs['inpaint_mask'])
-
+                    test_model_kwargs['inpaint_mask'] = Resize([z_inpaint.shape[-1], z_inpaint.shape[-1]])(inpaint_mask)
+    
+                    # Sampling
                     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                    samples_ddim, intermediates = sampler.sample(S=opt.ddim_steps,
-                                                        conditioning=c,
-                                                        batch_size=test_batch.shape[0],
-                                                        shape=shape,
-                                                        verbose=False,
-                                                        unconditional_guidance_scale=opt.scale,
-                                                        unconditional_conditioning=uc,
-                                                        eta=opt.ddim_eta,
-                                                        x_T=start_code,
-                                                        log_every_t=100,
-                                                        test_model_kwargs=test_model_kwargs, src_im=test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32), tar=test_batch.to("cuda"))
-                    # breakpoint()
-                    save_intermediates = False
-                    
-                    # breakpoint()
-                    if save_intermediates:
-                        intermediate_pred_x0 = intermediates['pred_x0']
-                        intermediate_noised = intermediates['x_inter']
-                        for i in range(len(intermediate_pred_x0)):
-                            save_sample_by_decode(intermediate_pred_x0[i], model, Base_path="Save_intermediates/pred_x0", segment_id_batch=segment_id_batch, intermediate_num=i)
-                            save_sample_by_decode(intermediate_noised[i], model, Base_path="Save_intermediates/intermediate", segment_id_batch=segment_id_batch, intermediate_num=i)
-                    
+                    samples_ddim, intermediates = sampler.sample(
+                        S=opt.ddim_steps,
+                        conditioning=c,
+                        batch_size=test_batch.shape[0],
+                        shape=shape,
+                        verbose=False,
+                        unconditional_guidance_scale=opt.scale,
+                        unconditional_conditioning=uc,
+                        eta=opt.ddim_eta,
+                        x_T=start_code,
+                        log_every_t=100,
+                        test_model_kwargs=test_model_kwargs,
+                        src_im=test_model_kwargs['ref_imgs'].squeeze(1).to(torch.float32),
+                        tar=test_batch
+                    )
+    
                     # Decode samples
                     x_samples_ddim = model.decode_first_stage(samples_ddim)
-                    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                    x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+                    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, 0.0, 1.0)
+    
+                    # Save images
+                    for i in range(x_samples_ddim.size(0)):
+                        segment_id = segment_id_batch[i]
+    
+                        # Generated image
+                        gen_img = x_samples_ddim[i]
+                        gen_img_pil = transforms.ToPILImage()(gen_img.cpu())
+                        gen_img_filename = os.path.join(result_path, f"{segment_id}.png")
+                        gen_img_pil.save(gen_img_filename)
+    
+                        # Ground truth image
+                        gt_img = test_batch[i]
+                        gt_img = torch.clamp((gt_img + 1.0) / 2.0, 0.0, 1.0)
+                        gt_img_pil = transforms.ToPILImage()(gt_img.cpu())
+                        gt_img_filename = os.path.join(sample_path, f"{segment_id}_GT.png")
+                        gt_img_pil.save(gt_img_filename)
+    
+                        # Inpaint image
+                        inpaint_img = inpaint_image[i]
+                        inpaint_img = torch.clamp((inpaint_img + 1.0) / 2.0, 0.0, 1.0)
+                        inpaint_img_pil = transforms.ToPILImage()(inpaint_img.cpu())
+                        inpaint_img_filename = os.path.join(sample_path, f"{segment_id}_inpaint.png")
+                        inpaint_img_pil.save(inpaint_img_filename)
+    
+                        # Reference image
+                        ref_img = test_model_kwargs['ref_imgs'].squeeze(1)[i]
+                        ref_img = torch.clamp((ref_img + 1.0) / 2.0, 0.0, 1.0)
+                        ref_img_pil = transforms.ToPILImage()(ref_img.cpu())
+                        ref_img_filename = os.path.join(sample_path, f"{segment_id}_ref.png")
+                        ref_img_pil.save(ref_img_filename)
+    
+                        # Mask image
+                        mask = inpaint_mask[i]
+                        mask_pil = transforms.ToPILImage()(mask.cpu())
+                        mask_filename = os.path.join(sample_path, f"{segment_id}_mask.png")
+                        mask_pil.save(mask_filename)
+    
+                        # Create a grid image
+                        grid_imgs = torch.stack([gt_img.cpu(), inpaint_img.cpu(), ref_img.cpu(), gen_img.cpu()], dim=0)
+                        grid = make_grid(grid_imgs, nrow=2)
+                        grid_pil = transforms.ToPILImage()(grid)
+                        grid_filename = os.path.join(grid_path, f"grid-{segment_id}.png")
+                        grid_pil.save(grid_filename)
+    
+                    all_samples.append(x_samples_ddim)
 
-                    x_checked_image = x_samples_ddim
-                    x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
-
-                    def un_norm(x):
-                        return (x + 1.0) / 2.0
-
-                    def un_norm_clip(x1):
-                        x = x1 * 1.0  # to avoid changing the original tensor or clone() can be used
-                        reduce = False
-                        if len(x.shape) == 3:
-                            x = x.unsqueeze(0)
-                            reduce = True
-                        x[:,0,:,:] = x[:,0,:,:] * 0.26862954 + 0.48145466
-                        x[:,1,:,:] = x[:,1,:,:] * 0.26130258 + 0.4578275
-                        x[:,2,:,:] = x[:,2,:,:] * 0.27577711 + 0.40821073
-                        
-                        if reduce:
-                            x = x.squeeze(0)
-                        return x
-
-                    # Configure logging
-                    logging.basicConfig(
-                        filename='image_saving.log',
-                        filemode='a',
-                        format='%(asctime)s - %(levelname)s - %(message)s',
-                        level=logging.DEBUG
-                    )
-                    
-                    if not opt.skip_save:
-                        for i, x_sample in enumerate(x_checked_image_torch):
-                            try:
-                                logging.info(f"Processing sample {i} with segment ID {segment_id_batch[i]}.")
-                    
-                                all_img = []
-                                all_img.append(un_norm(test_batch[i]).cpu())  # Original Image (GT)
-                                all_img.append(un_norm(inpaint_image[i]).cpu())  # Inpaint Image
-                    
-                                # Process Reference Image
-                                ref_img = test_model_kwargs['ref_imgs'].squeeze(1)
-                                ref_img = Resize([512, 512])(ref_img)
-                                all_img.append(un_norm_clip(ref_img[i]).cpu())  # Reference Image
-                    
-                                all_img.append(x_sample)  # Generated Image
-                    
-                                # Create and save grid image
-                                grid = torch.stack(all_img, 0)
-                                grid = make_grid(grid)
-                                grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                                grid_image = Image.fromarray(grid.astype(np.uint8))
-                                grid_filename = os.path.join(grid_path, f'grid-{segment_id_batch[i]}.png')
-                                grid_image.save(grid_filename)
-                                logging.info(f"Grid image saved at {grid_filename}.")
-                    
-                                # Save Generated Image to Results
-                                generated_img = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                generated_image = Image.fromarray(generated_img.astype(np.uint8))
-                                generated_filename = os.path.join(result_path, f"{segment_id_batch[i]}.png")
-                                generated_image.save(generated_filename)
-                                logging.info(f"Generated image saved at {generated_filename}.")
-                    
-                                # Save Inpaint Mask to src_mask/
-                                if 'inpaint_mask' in test_model_kwargs and test_model_kwargs['inpaint_mask'][i] is not None:
-                                    inpaint_mask_tensor = un_norm(test_model_kwargs['inpaint_mask'][i]).cpu()
-                                    mask_save = 255. * rearrange(inpaint_mask_tensor, 'c h w -> h w c').numpy()
-                                    mask_save = cv2.cvtColor(mask_save, cv2.COLOR_GRAY2RGB)
-                                    mask_image = Image.fromarray(mask_save.astype(np.uint8))
-                                    mask_filename = os.path.join(src_mask_path, f"{segment_id_batch[i]}_mask.png")
-                                    mask_image.save(mask_filename)
-                                    logging.info(f"Inpaint mask saved at {mask_filename}.")
-                                else:
-                                    logging.warning(f"Inpaint mask missing for segment ID {segment_id_batch[i]}.")
-                    
-                                # Save Reference Mask to target_mask/
-                                if 'ref_mask' in test_model_kwargs and test_model_kwargs['ref_mask'] is not None:
-                                    ref_mask_tensor = un_norm(test_model_kwargs['ref_mask'][i]).cpu()
-                                    ref_mask = 255. * rearrange(ref_mask_tensor, 'c h w -> h w c').numpy()
-                                    logging.info(f"Reference mask found for segment ID {segment_id_batch[i]}.")
-                                else:
-                                    # If 'ref_mask' is not available, default to using the inpaint mask
-                                    ref_mask = mask_save
-                                    logging.info(f"'ref_mask' not found. Using inpaint mask for segment ID {segment_id_batch[i]}.")
-                    
-                                ref_mask = cv2.cvtColor(ref_mask, cv2.COLOR_GRAY2RGB)
-                                ref_mask_image = Image.fromarray(ref_mask.astype(np.uint8))
-                                ref_mask_filename = os.path.join(target_mask_path, f"{segment_id_batch[i]}_ref_mask.png")
-                                ref_mask_image.save(ref_mask_filename)
-                                logging.info(f"Reference mask saved at {ref_mask_filename}.")
-                    
-                                # Save Original Image (val_target) to samples/
-                                original_img = 255. * rearrange(un_norm(test_batch[i]).cpu().numpy(), 'c h w -> h w c')
-                                original_image = Image.fromarray(original_img.astype(np.uint8))
-                                original_filename = os.path.join(sample_path, f"{segment_id_batch[i]}.png")
-                                original_image.save(original_filename)
-                                logging.info(f"Original image saved at {original_filename}.")
-                    
-                                # Optionally, save other related images
-                                # Save Ground Truth Image
-                                GT_img = 255. * rearrange(all_img[0], 'c h w -> h w c').numpy()
-                                GT_image = Image.fromarray(GT_img.astype(np.uint8))
-                                GT_filename = os.path.join(sample_path, f"{segment_id_batch[i]}_GT.png")
-                                GT_image.save(GT_filename)
-                                logging.info(f"Ground truth image saved at {GT_filename}.")
-                    
-                                # Save Inpainted Image
-                                inpaint_img = 255. * rearrange(all_img[1], 'c h w -> h w c').numpy()
-                                inpaint_image_pil = Image.fromarray(inpaint_img.astype(np.uint8))
-                                inpaint_filename = os.path.join(sample_path, f"{segment_id_batch[i]}_inpaint.png")
-                                inpaint_image_pil.save(inpaint_filename)
-                                logging.info(f"Inpainted image saved at {inpaint_filename}.")
-                    
-                                # Save Reference Image
-                                ref_img_save = 255. * rearrange(all_img[2], 'c h w -> h w c').numpy()
-                                ref_image = Image.fromarray(ref_img_save.astype(np.uint8))
-                                ref_filename = os.path.join(sample_path, f"{segment_id_batch[i]}_ref.png")
-                                ref_image.save(ref_filename)
-                                logging.info(f"Reference image saved at {ref_filename}.")
-                    
-                                base_count += 1
-                    
-                            except Exception as e:
-                                logging.error(f"Error processing sample {i} (Segment ID: {segment_id_batch[i]}): {e}")
-                                continue  # Skip to the next sample in case of error
-                    
-                    if not opt.skip_grid:
-                        all_samples.append(x_checked_image_torch)
-                    
-                    print(f"Your samples are ready and waiting for you here: \n{outpath} \nEnjoy.")
-                    logging.info("Image saving process completed.")
+    # Final message
+    print(f"Your samples are ready and waiting for you here: \n{outpath} \nEnjoy.")
 
 if __name__ == "__main__":
     main()
